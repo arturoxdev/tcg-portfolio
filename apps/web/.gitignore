@@ -1,0 +1,9 @@
+# SQLite database files (incl. WAL/SHM sidecars)
+data/
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+
+# Env: keep .env.example tracked as a template (root .gitignore ignores .env*)
+!.env.example
