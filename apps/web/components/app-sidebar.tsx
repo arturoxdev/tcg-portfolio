@@ -25,6 +25,8 @@ import {
   SidebarRail,
 } from "@workspace/ui/components/sidebar";
 
+import { LogoutButton } from "@/components/logout-button";
+
 type NavItem = {
   title: string;
   href: string;
@@ -118,6 +120,9 @@ export function AppSidebar() {
               </SidebarMenuItem>
             );
           })}
+          <SidebarMenuItem>
+            <LogoutButton />
+          </SidebarMenuItem>
         </SidebarMenu>
       </SidebarFooter>
 

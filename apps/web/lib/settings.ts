@@ -1,6 +1,6 @@
 // SERVER ONLY — nunca importar desde componentes cliente.
 // Lecturas/escrituras de configuración persistente (tabla key-value `settings`).
-// server-only por transitividad: importa `db` (better-sqlite3, server-only).
+// server-only por transitividad: importa `db` (cliente libSQL/Turso, server-only).
 // NO lleva "use server": son funciones planas consumidas por Server Components
 // y por las server actions de `@/lib/actions`.
 
@@ -13,7 +13,7 @@ export const FX_RATE_KEY = "fx_rate";
 
 /** Lee el valor de una clave. Devuelve null si no existe. */
 export async function getSetting(key: string): Promise<string | null> {
-  const row = db
+  const row = await db
     .select({ value: settings.value })
     .from(settings)
     .where(eq(settings.key, key))
@@ -23,7 +23,8 @@ export async function getSetting(key: string): Promise<string | null> {
 
 /** UPSERT de una clave: inserta o actualiza el valor y `updatedAt`. */
 export async function setSetting(key: string, value: string): Promise<void> {
-  db.insert(settings)
+  await db
+    .insert(settings)
     .values({ key, value, updatedAt: new Date() })
     .onConflictDoUpdate({
       target: settings.key,

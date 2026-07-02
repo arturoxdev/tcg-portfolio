@@ -1,40 +1,42 @@
 // SERVER ONLY — nunca importar desde componentes cliente.
-// Este módulo abre una conexión better-sqlite3 al filesystem (Node runtime).
+// Este módulo abre una conexión libSQL (Turso) sobre red. No usa filesystem ni
+// módulos nativos, así que corre en entornos serverless (Vercel).
 // No añadir "use client"; consumir únicamente desde Server Components,
 // Route Handlers o Server Actions.
-import fs from "node:fs";
-import path from "node:path";
-import Database from "better-sqlite3";
-import { drizzle } from "drizzle-orm/better-sqlite3";
+//
+// ⚠️ El cliente libSQL es ASÍNCRONO: todas las llamadas a la DB
+// (.get()/.all()/.run()/.transaction()) devuelven Promises y deben `await`-earse.
+import { createClient } from "@libsql/client";
+import { drizzle } from "drizzle-orm/libsql";
 
 import * as schema from "./schema";
 
 /**
- * Ruta de la DB desde DATABASE_PATH (relativa al cwd de apps/web).
- * Se resuelve contra process.cwd() de forma estáticamente acotada para que el
- * tracer de Next (NFT) no intente trazar todo el proyecto (warning de Turbopack).
+ * Credenciales de Turso desde el entorno:
+ *  - TURSO_DATABASE_URL: la URL libsql://… (no es secreta).
+ *  - TURSO_AUTH_TOKEN:   token de acceso (secreto; en .env / Vercel env).
+ *
+ * En dev local se puede apuntar a un archivo con file:./data/tcg-portfolio.db,
+ * pero por defecto exigimos la URL remota para no divergir de producción.
  */
-const DB_PATH = process.env.DATABASE_PATH ?? "./data/tcg-portfolio.db";
+const url = process.env.TURSO_DATABASE_URL;
+const authToken = process.env.TURSO_AUTH_TOKEN;
+
+if (!url) {
+  throw new Error(
+    "Falta TURSO_DATABASE_URL en el entorno (apps/web/.env). " +
+      "Obtenla con `turso db show <db> --url`.",
+  );
+}
 
 function createConnection() {
-  // Asegura que el directorio padre exista antes de abrir la conexión.
-  // Soporta DATABASE_PATH absoluto o relativo al cwd de apps/web.
-  const resolvedPath = path.isAbsolute(DB_PATH)
-    ? DB_PATH
-    : path.join(process.cwd(), DB_PATH);
-  const dir = path.dirname(resolvedPath);
-  fs.mkdirSync(dir, { recursive: true });
-
-  const sqlite = new Database(resolvedPath);
-  sqlite.pragma("journal_mode = WAL");
-  sqlite.pragma("foreign_keys = ON");
-
-  return drizzle(sqlite, { schema });
+  const client = createClient({ url: url!, authToken });
+  return drizzle(client, { schema });
 }
 
 /**
  * Singleton vía globalThis para sobrevivir HMR en dev y no abrir
- * múltiples conexiones / file handles.
+ * múltiples clientes / conexiones.
  */
 const globalForDb = globalThis as unknown as {
   __tcgDb?: ReturnType<typeof createConnection>;

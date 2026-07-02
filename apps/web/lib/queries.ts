@@ -1,6 +1,6 @@
 // LECTURAS de DB para Server Components (NO "use server": son helpers de
 // lectura invocados desde RSC, no acciones de mutación expuestas al cliente).
-// server-only por transitividad: importa `db` (better-sqlite3, server-only).
+// server-only por transitividad: importa `db` (cliente libSQL/Turso, server-only).
 
 import { asc, desc, eq } from "drizzle-orm";
 
@@ -74,16 +74,16 @@ export async function getHoldingsWithPnl(): Promise<HoldingWithPnl[]> {
   // Permite marcar visualmente actualizadas vs fallidas (independiente de si
   // la carta tiene un precio viejo de una corrida anterior).
   const lastUpdate =
-    db
+    (await db
       .select()
       .from(priceUpdates)
       .orderBy(desc(priceUpdates.createdAt))
       .limit(1)
-      .get() ?? null;
+      .get()) ?? null;
 
   const pricedInLastUpdate = new Set<string>();
   if (lastUpdate) {
-    const pricedRows = db
+    const pricedRows = await db
       .select({ holdingId: holdingPrices.holdingId })
       .from(holdingPrices)
       .where(eq(holdingPrices.updateId, lastUpdate.id))
@@ -140,19 +140,19 @@ export async function getPortfolioSummary(): Promise<PortfolioSummary> {
   );
 
   const lastUpdate =
-    db
+    (await db
       .select()
       .from(priceUpdates)
       .orderBy(desc(priceUpdates.createdAt))
       .limit(1)
-      .get() ?? null;
+      .get()) ?? null;
 
   return { ...aggregates, lastUpdate };
 }
 
 /** Serie de historial (price_updates) ordenada cronológicamente ascendente. */
 export async function getHistory(): Promise<HistoryPoint[]> {
-  const rows = db
+  const rows = await db
     .select()
     .from(priceUpdates)
     .orderBy(asc(priceUpdates.createdAt))

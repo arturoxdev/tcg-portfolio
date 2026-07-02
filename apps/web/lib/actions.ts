@@ -1,7 +1,7 @@
 "use server";
 
 // MUTACIONES (Server Actions). server-only por transitividad: importa `db`
-// (better-sqlite3) y el cliente TCG (`@/lib/tcg-api`).
+// (cliente libSQL/Turso, async) y el cliente TCG (`@/lib/tcg-api`).
 
 import { revalidatePath } from "next/cache";
 import { and, desc, eq } from "drizzle-orm";
@@ -91,7 +91,7 @@ export async function addHolding(
     input.costBasisMxn,
   );
 
-  const inserted = db
+  const inserted = await db
     .insert(holdings)
     .values({
       cardId: input.cardId,
@@ -138,7 +138,7 @@ export async function updateHolding(
 
   // Estado actual: necesario para resolver la regla comprada/de_sobre cuando
   // solo se cambia uno de los dos campos (tipo o costo).
-  const current = db
+  const current = await db
     .select({
       acquisitionType: holdings.acquisitionType,
       costBasisMxn: holdings.costBasisMxn,
@@ -174,7 +174,7 @@ export async function updateHolding(
     values.costBasisMxn = normalizeCostBasis(acquisitionType, nextCost);
   }
 
-  db.update(holdings).set(values).where(eq(holdings.id, id)).run();
+  await db.update(holdings).set(values).where(eq(holdings.id, id)).run();
 
   revalidateAll();
   return { ok: true };
@@ -187,7 +187,7 @@ export async function updateHolding(
 /** Elimina un holding (cascade borra sus holding_prices). */
 export async function deleteHolding(id: string): Promise<{ ok: true }> {
   if (!id) throw new Error("deleteHolding: 'id' es requerido.");
-  db.delete(holdings).where(eq(holdings.id, id)).run();
+  await db.delete(holdings).where(eq(holdings.id, id)).run();
   revalidateAll();
   return { ok: true };
 }
@@ -310,11 +310,11 @@ function pickPriceForPrinting(
  * CORE: actualiza precios de todos los holdings y crea un snapshot.
  *
  * Estrategia:
- *  - Fase async (fuera de transacción): fetch SECUENCIAL con throttle,
+ *  - Fase de fetch (fuera de transacción): fetch SECUENCIAL con throttle,
  *    acumulando éxitos/fallos en memoria. Resiliente: un fallo NO aborta.
- *  - Fase sync (dentro de `db.transaction`): inserta price_updates +
- *    holding_prices y actualiza holdings.lastMarketMxn (better-sqlite3 es
- *    síncrono y no admite await dentro de la transacción).
+ *  - Fase de persistencia (dentro de `db.transaction` async de libSQL):
+ *    inserta price_updates + holding_prices y actualiza holdings.lastMarketMxn.
+ *    Con libSQL cada sentencia es un round-trip; a nuestra escala es trivial.
  */
 export async function runPriceUpdate(
   fxRate?: number,
@@ -334,7 +334,7 @@ export async function runPriceUpdate(
     );
   }
 
-  const allHoldings = db.select().from(holdings).all();
+  const allHoldings = await db.select().from(holdings).all();
 
   if (allHoldings.length === 0) {
     return {
@@ -481,10 +481,10 @@ export async function runPriceUpdate(
   });
   const totals = snapshotTotals(snapshotRows);
 
-  // --- Fase sync: transacción better-sqlite3 (sin await dentro). ---
+  // --- Fase de persistencia: transacción async de libSQL. ---
   const updatedAt = new Date();
-  const updateId = db.transaction((tx) => {
-    const update = tx
+  const updateId = await db.transaction(async (tx) => {
+    const update = await tx
       .insert(priceUpdates)
       .values({
         fxRate: resolvedFxRate,
@@ -498,7 +498,8 @@ export async function runPriceUpdate(
       .get();
 
     for (const p of priced) {
-      tx.insert(holdingPrices)
+      await tx
+        .insert(holdingPrices)
         .values({
           updateId: update.id,
           holdingId: p.holdingId,
@@ -509,7 +510,8 @@ export async function runPriceUpdate(
         })
         .run();
 
-      tx.update(holdings)
+      await tx
+        .update(holdings)
         .set({ lastMarketMxn: p.marketPriceMxn, updatedAt })
         .where(eq(holdings.id, p.holdingId))
         .run();
@@ -570,17 +572,21 @@ export async function retryHoldingPrice(
 ): Promise<RetryHoldingPriceResult> {
   if (!holdingId) throw new Error("retryHoldingPrice: 'holdingId' es requerido.");
 
-  const h = db.select().from(holdings).where(eq(holdings.id, holdingId)).get();
+  const h = await db
+    .select()
+    .from(holdings)
+    .where(eq(holdings.id, holdingId))
+    .get();
   if (!h) throw new Error(`retryHoldingPrice: no existe el holding ${holdingId}.`);
   const name = h.name ?? h.id;
 
   const lastUpdate =
-    db
+    (await db
       .select()
       .from(priceUpdates)
       .orderBy(desc(priceUpdates.createdAt))
       .limit(1)
-      .get() ?? null;
+      .get()) ?? null;
 
   if (!lastUpdate) {
     return {
@@ -644,10 +650,11 @@ export async function retryHoldingPrice(
   }
 
   const updatedAt = new Date();
-  db.transaction((tx) => {
+  await db.transaction(async (tx) => {
     // Idempotencia: si ya hubiera una fila para este par (no debería, porque
     // falló), la reemplazamos.
-    tx.delete(holdingPrices)
+    await tx
+      .delete(holdingPrices)
       .where(
         and(
           eq(holdingPrices.updateId, lastUpdate.id),
@@ -656,7 +663,8 @@ export async function retryHoldingPrice(
       )
       .run();
 
-    tx.insert(holdingPrices)
+    await tx
+      .insert(holdingPrices)
       .values({
         updateId: lastUpdate.id,
         holdingId,
@@ -667,15 +675,16 @@ export async function retryHoldingPrice(
       })
       .run();
 
-    tx.update(holdings)
+    await tx
+      .update(holdings)
       .set({ lastMarketMxn: mxn, updatedAt })
       .where(eq(holdings.id, holdingId))
       .run();
 
     // Recalcula los totales del snapshot con el precio que cada holding tiene
     // EN este update (los que siguen fallidos cuentan como sin precio).
-    const allHoldings = tx.select().from(holdings).all();
-    const pricedRows = tx
+    const allHoldings = await tx.select().from(holdings).all();
+    const pricedRows = await tx
       .select({
         holdingId: holdingPrices.holdingId,
         marketPriceMxn: holdingPrices.marketPriceMxn,
@@ -698,7 +707,8 @@ export async function retryHoldingPrice(
     });
     const totals = snapshotTotals(snapshotRows);
 
-    tx.update(priceUpdates)
+    await tx
+      .update(priceUpdates)
       .set({
         totalCostMxn: totals.total_cost_mxn,
         totalValueMxn: totals.total_value_mxn,
