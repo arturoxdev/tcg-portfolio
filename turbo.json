@@ -1,7 +1,16 @@
 {
   "$schema": "https://turbo.build/schema.json",
   "ui": "tui",
-  "globalEnv": ["NODE_ENV", "DATABASE_PATH", "TCG_API_KEY"],
+  "globalEnv": [
+    "NODE_ENV",
+    "TCG_API_KEY",
+    "TURSO_DATABASE_URL",
+    "TURSO_AUTH_TOKEN",
+    "CRON_SECRET",
+    "AUTH_USERNAME",
+    "AUTH_PASSWORD",
+    "AUTH_SECRET"
+  ],
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
