@@ -56,6 +56,10 @@ export interface PortfolioAggregates {
   valorColeccion: number;
   pnlComprodasMxn: number;
   cardCount: number;
+  /** Número de lotes 'comprada'. */
+  boughtCount: number;
+  /** Número de lotes 'de_sobre'. */
+  foundCount: number;
 }
 
 /**
@@ -76,14 +80,18 @@ export function portfolioAggregates(rows: PortfolioRow[]): PortfolioAggregates {
   let capitalInvertido = 0;
   let valorCompradas = 0;
   let valorEncontrado = 0;
+  let boughtCount = 0;
+  let foundCount = 0;
 
   for (const row of rows) {
     const market = row.marketMxn ?? 0; // sin precio aún → 0
     if (row.acquisitionType === "comprada") {
       capitalInvertido += row.costBasisMxn ?? 0;
       valorCompradas += market;
+      boughtCount += 1;
     } else {
       valorEncontrado += market;
+      foundCount += 1;
     }
   }
 
@@ -100,6 +108,8 @@ export function portfolioAggregates(rows: PortfolioRow[]): PortfolioAggregates {
     valorColeccion,
     pnlComprodasMxn,
     cardCount: rows.length,
+    boughtCount,
+    foundCount,
   };
 }
 

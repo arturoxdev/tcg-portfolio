@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import {
+  ArrowDownUpIcon,
   CircleCheckIcon,
   ImageOffIcon,
   LayersIcon,
@@ -52,6 +53,39 @@ type Holding = HoldingWithPnl;
 
 /** Sentinela para "Todos los juegos" (los Select de base-ui no aceptan ""). */
 const ALL = "__all__";
+
+/** Sentinela para "sin orden" (mantiene el orden por defecto de la consulta). */
+const SORT_NONE = "none";
+
+/** Opciones de ordenamiento del Select, en el orden en que se muestran. */
+const SORT_OPTIONS: { value: string; label: string }[] = [
+  { value: SORT_NONE, label: "Orden por defecto" },
+  { value: "value_desc", label: "Valor actual: mayor a menor" },
+  { value: "value_asc", label: "Valor actual: menor a mayor" },
+  { value: "pnl_desc", label: "P&L: mayor a menor" },
+  { value: "pnl_asc", label: "P&L: menor a mayor" },
+];
+
+/**
+ * Ordena `holdings` según la opción elegida. Los valores nulos (cartas sin
+ * precio, o `de_sobre` sin P&L) van SIEMPRE al final, sin importar la dirección.
+ * Devuelve el arreglo original cuando la opción es "sin orden".
+ */
+function sortHoldings(holdings: Holding[], sort: string): Holding[] {
+  if (sort === SORT_NONE) return holdings;
+  const getValue = sort.startsWith("value")
+    ? (h: Holding) => h.marketMxn
+    : (h: Holding) => h.pnlMxn;
+  const asc = sort.endsWith("asc");
+  return [...holdings].sort((a, b) => {
+    const av = getValue(a);
+    const bv = getValue(b);
+    if (av == null && bv == null) return 0;
+    if (av == null) return 1;
+    if (bv == null) return -1;
+    return asc ? av - bv : bv - av;
+  });
+}
 
 /** Clave estable del juego de una carta (slug → nombre → sentinela "sin juego"). */
 function gameKey(h: Holding): string {
@@ -196,6 +230,8 @@ export type HoldingsViewProps = {
 export function HoldingsView({ holdings }: HoldingsViewProps) {
   // Estado del filtro por juego (slug del juego o ALL).
   const [game, setGame] = React.useState<string>(ALL);
+  // Estado del ordenamiento (ver SORT_OPTIONS).
+  const [sort, setSort] = React.useState<string>(SORT_NONE);
 
   // Juegos presentes en la colección, deduplicados y ordenados. SOLO se listan
   // los TCG que el usuario realmente tiene agregados (no el catálogo de la API).
@@ -223,6 +259,13 @@ export function HoldingsView({ holdings }: HoldingsViewProps) {
     [holdings, activeGame],
   );
 
+  // Aplica el ordenamiento elegido sobre las cartas ya filtradas por juego.
+  // Alimenta tanto la vista Tabla como la Galería.
+  const sorted = React.useMemo(
+    () => sortHoldings(filtered, sort),
+    [filtered, sort],
+  );
+
   return (
     <Tabs defaultValue="table">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -237,45 +280,70 @@ export function HoldingsView({ holdings }: HoldingsViewProps) {
           </TabsTrigger>
         </TabsList>
 
-        {/* Filtro por juego: solo se muestra si coleccionas más de un TCG. */}
-        {games.length > 1 && (
-          <div className="flex items-center gap-2">
-            <Select
-              value={activeGame}
-              onValueChange={(value) => setGame(value as string)}
-            >
-              <SelectTrigger
-                aria-label="Filtrar por juego"
-                className="min-w-44"
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Filtro por juego: solo se muestra si coleccionas más de un TCG. */}
+          {games.length > 1 && (
+            <div className="flex items-center gap-2">
+              <Select
+                value={activeGame}
+                onValueChange={(value) => setGame(value as string)}
               >
-                <LayersIcon className="text-muted-foreground" />
-                {/* base-ui muestra el `value` crudo por defecto: mapeamos
-                    la key del juego a su nombre legible para el trigger. */}
-                <SelectValue>
-                  {(value) =>
-                    value == null || value === ALL
-                      ? "Todos los juegos"
-                      : (games.find((g) => g.key === value)?.name ??
-                        "Todos los juegos")
-                  }
-                </SelectValue>
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value={ALL}>Todos los juegos</SelectItem>
-                {games.map((g) => (
-                  <SelectItem key={g.key} value={g.key}>
-                    {g.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            {activeGame !== ALL && (
-              <span className="text-xs text-muted-foreground tabular-nums">
-                {filtered.length} de {holdings.length}
-              </span>
-            )}
-          </div>
-        )}
+                <SelectTrigger
+                  aria-label="Filtrar por juego"
+                  className="min-w-44"
+                >
+                  <LayersIcon className="text-muted-foreground" />
+                  {/* base-ui muestra el `value` crudo por defecto: mapeamos
+                      la key del juego a su nombre legible para el trigger. */}
+                  <SelectValue>
+                    {(value) =>
+                      value == null || value === ALL
+                        ? "Todos los juegos"
+                        : (games.find((g) => g.key === value)?.name ??
+                          "Todos los juegos")
+                    }
+                  </SelectValue>
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={ALL}>Todos los juegos</SelectItem>
+                  {games.map((g) => (
+                    <SelectItem key={g.key} value={g.key}>
+                      {g.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {activeGame !== ALL && (
+                <span className="text-xs text-muted-foreground tabular-nums">
+                  {filtered.length} de {holdings.length}
+                </span>
+              )}
+            </div>
+          )}
+
+          {/* Ordenamiento por valor actual o P&L (aplica a Tabla y Galería). */}
+          <Select
+            value={sort}
+            onValueChange={(value) => setSort(value as string)}
+          >
+            <SelectTrigger aria-label="Ordenar cartas" className="min-w-52">
+              <ArrowDownUpIcon className="text-muted-foreground" />
+              <SelectValue>
+                {(value) =>
+                  SORT_OPTIONS.find((o) => o.value === value)?.label ??
+                  "Orden por defecto"
+                }
+              </SelectValue>
+            </SelectTrigger>
+            <SelectContent>
+              {SORT_OPTIONS.map((o) => (
+                <SelectItem key={o.value} value={o.value}>
+                  {o.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
       </div>
 
       {/* ---------------------------------------------------------------- */}
@@ -299,7 +367,7 @@ export function HoldingsView({ holdings }: HoldingsViewProps) {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {filtered.map((h) => (
+              {sorted.map((h) => (
                 <TableRow
                   key={h.id}
                   className={cn(
@@ -374,7 +442,7 @@ export function HoldingsView({ holdings }: HoldingsViewProps) {
       {/* ---------------------------------------------------------------- */}
       <TabsContent value="gallery">
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
-          {filtered.map((h) => (
+          {sorted.map((h) => (
             <Card
               key={h.id}
               size="sm"
