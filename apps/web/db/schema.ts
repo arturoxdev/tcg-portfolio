@@ -61,7 +61,20 @@ export const holdings = sqliteTable("holdings", {
 });
 
 /**
+ * Cómo se disparó una corrida de actualización de precios:
+ *  - 'cron':   Vercel Cron (el "webhook" diario).
+ *  - 'manual': el botón "Update prices" de la UI.
+ */
+export const PRICE_UPDATE_TRIGGERS = ["cron", "manual"] as const;
+export type PriceUpdateTrigger = (typeof PRICE_UPDATE_TRIGGERS)[number];
+
+/**
  * `price_updates` — un evento por "Update prices".
+ *
+ * Además de los totales del snapshot, guarda metadatos de la corrida para el
+ * panel de Webhook: cómo se disparó, cuántas cartas fallaron y si se cortó por
+ * el límite diario (429). Los éxitos NO se guardan aparte: son `cardCount`
+ * (número de holdings que sí obtuvieron precio en la corrida).
  */
 export const priceUpdates = sqliteTable("price_updates", {
   id: text("id")
@@ -79,7 +92,21 @@ export const priceUpdates = sqliteTable("price_updates", {
   totalValueMxn: real("total_value_mxn"),
   totalPnlMxn: real("total_pnl_mxn"),
   totalPnlPct: real("total_pnl_pct"),
+  // Número de holdings que SÍ obtuvieron precio en esta corrida (éxitos).
   cardCount: integer("card_count"),
+
+  // Cómo se disparó la corrida ('cron' | 'manual').
+  triggerSource: text("trigger_source", { enum: PRICE_UPDATE_TRIGGERS })
+    .notNull()
+    .default("manual"),
+
+  // Número de holdings que fallaron (no obtuvieron precio) en esta corrida.
+  failedCount: integer("failed_count").notNull().default(0),
+
+  // true si la corrida se detuvo por el límite diario (429) de la TCG API.
+  rateLimited: integer("rate_limited", { mode: "boolean" })
+    .notNull()
+    .default(false),
 });
 
 /**

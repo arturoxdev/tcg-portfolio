@@ -2,7 +2,7 @@
 // lectura invocados desde RSC, no acciones de mutación expuestas al cliente).
 // server-only por transitividad: importa `db` (cliente libSQL/Turso, server-only).
 
-import { asc, desc, eq } from "drizzle-orm";
+import { asc, desc, eq, max } from "drizzle-orm";
 
 import {
   db,
@@ -12,6 +12,7 @@ import {
   type Holding,
   type HoldingPrice,
   type PriceUpdate,
+  type PriceUpdateTrigger,
 } from "@/db";
 import { holdingPnl, isAlert, portfolioAggregates } from "@/lib/pnl";
 import type { PortfolioAggregates } from "@/lib/pnl";
@@ -37,6 +38,12 @@ export type HoldingWithPnl = Holding & {
   alert: boolean;
   /** Estado respecto a la última actualización de precios. null si nunca corrió. */
   lastUpdateStatus: LastUpdateStatus | null;
+  /**
+   * Fecha del ÚLTIMO precio registrado para esta carta (max de sus
+   * `holding_prices`). null si nunca obtuvo precio. Sirve para verificar de un
+   * vistazo si el webhook está refrescando esta carta.
+   */
+  lastPricedAt: Date | null;
 };
 
 /** Resumen del portafolio: agregados + último evento de actualización. */
@@ -91,6 +98,27 @@ export async function getHoldingsWithPnl(): Promise<HoldingWithPnl[]> {
     for (const r of pricedRows) pricedInLastUpdate.add(r.holdingId);
   }
 
+  // Fecha del último precio registrado por carta (max de sus holding_prices).
+  // `max()` sobre una columna timestamp devuelve el entero crudo (segundos
+  // unixepoch), así que lo convertimos a Date manualmente.
+  const lastPricedRows = await db
+    .select({
+      holdingId: holdingPrices.holdingId,
+      lastPricedAt: max(holdingPrices.createdAt),
+    })
+    .from(holdingPrices)
+    .groupBy(holdingPrices.holdingId)
+    .all();
+
+  const lastPricedByHolding = new Map<string, Date>();
+  for (const r of lastPricedRows) {
+    if (r.lastPricedAt == null) continue;
+    const secs = Number(r.lastPricedAt);
+    if (Number.isFinite(secs)) {
+      lastPricedByHolding.set(r.holdingId, new Date(secs * 1000));
+    }
+  }
+
   /** Deriva el estado del holding respecto a la última corrida. */
   const statusFor = (h: Holding): LastUpdateStatus | null => {
     if (!lastUpdate) return null; // nunca se corrió un update
@@ -103,6 +131,7 @@ export async function getHoldingsWithPnl(): Promise<HoldingWithPnl[]> {
   return rows.map((h) => {
     const marketMxn = h.lastMarketMxn ?? null;
     const lastUpdateStatus = statusFor(h);
+    const lastPricedAt = lastPricedByHolding.get(h.id) ?? null;
 
     if (h.acquisitionType === "de_sobre") {
       return {
@@ -112,6 +141,7 @@ export async function getHoldingsWithPnl(): Promise<HoldingWithPnl[]> {
         pnlPct: null,
         alert: false,
         lastUpdateStatus,
+        lastPricedAt,
       };
     }
 
@@ -123,6 +153,7 @@ export async function getHoldingsWithPnl(): Promise<HoldingWithPnl[]> {
       pnlPct,
       alert: isAlert(pnlPct),
       lastUpdateStatus,
+      lastPricedAt,
     };
   });
 }
@@ -170,6 +201,89 @@ export async function getHistory(): Promise<HistoryPoint[]> {
       fxRate: u.fxRate,
     };
   });
+}
+
+/**
+ * Una corrida del webhook/actualización de precios, con su desglose de
+ * éxitos/fallos para el panel de Webhook.
+ */
+export type WebhookRun = {
+  id: string;
+  /** Cuándo ocurrió. */
+  createdAt: Date;
+  /** Cómo se disparó: 'cron' (webhook diario) o 'manual' (botón). */
+  triggerSource: PriceUpdateTrigger;
+  /** Cartas que SÍ obtuvieron precio. */
+  succeeded: number;
+  /** Cartas que fallaron. */
+  failed: number;
+  /** succeeded + failed (cartas intentadas en la corrida). */
+  total: number;
+  /** true si se detuvo por el límite diario (429) de la TCG API. */
+  rateLimited: boolean;
+  /** Tipo de cambio aplicado. */
+  fxRate: number;
+  /** Valor total de la colección en ese snapshot (MXN). */
+  totalValueMxn: number | null;
+};
+
+/** Resumen agregado de todas las corridas del webhook. */
+export type WebhookSummary = {
+  /** Total de corridas registradas. */
+  totalRuns: number;
+  /** Cuántas corridas tuvieron al menos un fallo. */
+  runsWithFailures: number;
+  /** Cuántas corridas se cortaron por rate limit (429). */
+  rateLimitedRuns: number;
+  /** La corrida más reciente (para el estado "¿está vivo el webhook?"). */
+  lastRun: WebhookRun | null;
+  /** La corrida por cron más reciente (null si el cron nunca ha corrido). */
+  lastCronRun: WebhookRun | null;
+};
+
+/** Mapea una fila de `price_updates` a `WebhookRun`. */
+function toWebhookRun(u: PriceUpdate): WebhookRun {
+  const succeeded = u.cardCount ?? 0;
+  const failed = u.failedCount ?? 0;
+  return {
+    id: u.id,
+    createdAt: u.createdAt,
+    triggerSource: u.triggerSource,
+    succeeded,
+    failed,
+    total: succeeded + failed,
+    rateLimited: u.rateLimited,
+    fxRate: u.fxRate,
+    totalValueMxn: u.totalValueMxn,
+  };
+}
+
+/** Todas las corridas del webhook, más recientes primero. */
+export async function getWebhookRuns(): Promise<WebhookRun[]> {
+  const rows = await db
+    .select()
+    .from(priceUpdates)
+    .orderBy(desc(priceUpdates.createdAt))
+    .all();
+  return rows.map(toWebhookRun);
+}
+
+/** Corridas + resumen agregado para el panel de Webhook. */
+export async function getWebhookOverview(): Promise<{
+  runs: WebhookRun[];
+  summary: WebhookSummary;
+}> {
+  const runs = await getWebhookRuns();
+
+  const summary: WebhookSummary = {
+    totalRuns: runs.length,
+    runsWithFailures: runs.filter((r) => r.failed > 0).length,
+    rateLimitedRuns: runs.filter((r) => r.rateLimited).length,
+    lastRun: runs[0] ?? null,
+    lastCronRun: runs.find((r) => r.triggerSource === "cron") ?? null,
+  };
+
+  return { runs, summary };
 }
 
 /** Historial de precios de un holding (drill-down), más antiguos primero. */

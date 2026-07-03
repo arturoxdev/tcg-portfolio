@@ -8,6 +8,7 @@ import {
   SearchIcon,
   SettingsIcon,
   WalletCardsIcon,
+  WebhookIcon,
   type LucideIcon,
 } from "lucide-react";
 
@@ -38,6 +39,7 @@ const NAV_ITEMS: NavItem[] = [
   { title: "Buscar cartas", href: "/search", icon: SearchIcon },
   { title: "Mis cartas", href: "/holdings", icon: WalletCardsIcon },
   { title: "Historial", href: "/history", icon: LineChartIcon },
+  { title: "Webhook", href: "/webhook", icon: WebhookIcon },
 ];
 
 const FOOTER_ITEMS: NavItem[] = [

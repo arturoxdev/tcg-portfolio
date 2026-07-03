@@ -43,7 +43,7 @@ import {
 import { cn } from "@workspace/ui/lib/utils";
 
 import type { HoldingWithPnl } from "@/lib/queries";
-import { formatDate, formatMxn } from "@/lib/format";
+import { formatDate, formatDateTime, formatMxn } from "@/lib/format";
 import { PnlBadge } from "@/components/pnl-badge";
 
 import { HoldingActions } from "./holding-actions";
@@ -362,6 +362,7 @@ export function HoldingsView({ holdings }: HoldingsViewProps) {
                 <TableHead className="text-right">Costo</TableHead>
                 <TableHead className="text-right">Valor actual</TableHead>
                 <TableHead>P&amp;L</TableHead>
+                <TableHead>Último precio</TableHead>
                 <TableHead>Fecha</TableHead>
                 <TableHead className="w-10" />
               </TableRow>
@@ -423,6 +424,13 @@ export function HoldingsView({ holdings }: HoldingsViewProps) {
                   </TableCell>
                   <TableCell>
                     <PnlCell holding={h} />
+                  </TableCell>
+                  <TableCell className="text-muted-foreground text-xs whitespace-nowrap">
+                    {h.lastPricedAt ? (
+                      formatDateTime(h.lastPricedAt)
+                    ) : (
+                      <span className="italic">Nunca</span>
+                    )}
                   </TableCell>
                   <TableCell className="text-muted-foreground">
                     {formatDate(h.purchaseDate)}
@@ -489,6 +497,11 @@ export function HoldingsView({ holdings }: HoldingsViewProps) {
                   )}
                   <PnlCell holding={h} size="sm" />
                 </div>
+                <p className="text-[10px] text-muted-foreground">
+                  {h.lastPricedAt
+                    ? `Precio: ${formatDateTime(h.lastPricedAt)}`
+                    : "Sin precio registrado"}
+                </p>
                 {h.lastUpdateStatus === "failed" && (
                   <RetryPriceButton
                     holdingId={h.id}

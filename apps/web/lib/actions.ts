@@ -12,6 +12,7 @@ import {
   holdings,
   priceUpdates,
   type AcquisitionType,
+  type PriceUpdateTrigger,
 } from "@/db";
 import { getCardPrices, TcgApiError } from "@/lib/tcg-api";
 import { isRateLimited } from "@/lib/api-error";
@@ -22,7 +23,7 @@ import * as settings from "@/lib/settings";
 import { sleep } from "@/lib/throttle";
 
 /** Rutas afectadas por cualquier mutación de holdings / precios. */
-const AFFECTED_PATHS = ["/", "/holdings", "/history"] as const;
+const AFFECTED_PATHS = ["/", "/holdings", "/history", "/webhook"] as const;
 
 function revalidateAll(): void {
   for (const p of AFFECTED_PATHS) revalidatePath(p);
@@ -318,7 +319,12 @@ function pickPriceForPrinting(
  */
 export async function runPriceUpdate(
   fxRate?: number,
+  opts?: { trigger?: PriceUpdateTrigger },
 ): Promise<RunPriceUpdateResult> {
+  // Cómo se disparó la corrida (para el panel de Webhook). El botón de la UI no
+  // pasa nada → 'manual'; el cron de Vercel pasa 'cron'.
+  const triggerSource: PriceUpdateTrigger = opts?.trigger ?? "manual";
+
   // Resuelve el FX: usa el argumento si viene; si no, el configurado en Settings.
   const resolvedFxRate =
     fxRate != null ? fxRate : await settings.getFxRate();
@@ -493,6 +499,9 @@ export async function runPriceUpdate(
         totalPnlMxn: totals.total_pnl_mxn,
         totalPnlPct: totals.total_pnl_pct,
         cardCount: totals.card_count,
+        triggerSource,
+        failedCount: failed.length,
+        rateLimited,
       })
       .returning({ id: priceUpdates.id })
       .get();
@@ -715,6 +724,10 @@ export async function retryHoldingPrice(
         totalPnlMxn: totals.total_pnl_mxn,
         totalPnlPct: totals.total_pnl_pct,
         cardCount: totals.card_count,
+        // Una carta que estaba fallida pasó a "actualizada": baja el contador
+        // de fallos de ese snapshot (sin bajar de 0) para que el panel de
+        // Webhook siga cuadrando.
+        failedCount: Math.max(0, (lastUpdate.failedCount ?? 0) - 1),
       })
       .where(eq(priceUpdates.id, lastUpdate.id))
       .run();

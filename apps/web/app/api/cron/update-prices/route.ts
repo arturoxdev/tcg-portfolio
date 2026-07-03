@@ -39,7 +39,7 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    const result = await runPriceUpdate();
+    const result = await runPriceUpdate(undefined, { trigger: "cron" });
     console.log(
       `[cron/update-prices] ok: ${result.updated} actualizadas, ` +
         `${result.failed.length} fallidas` +
