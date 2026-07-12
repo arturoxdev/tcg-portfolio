@@ -4,17 +4,19 @@ import * as React from "react";
 import {
   ArrowDownUpIcon,
   CircleCheckIcon,
+  EyeIcon,
   ImageOffIcon,
   LayersIcon,
   LayoutGridIcon,
+  PlusIcon,
   TableIcon,
   TriangleAlertIcon,
 } from "lucide-react";
 
 import { Badge } from "@workspace/ui/components/badge";
+import { Button } from "@workspace/ui/components/button";
 import {
   Card,
-  CardAction,
   CardContent,
   CardHeader,
   CardTitle,
@@ -27,6 +29,13 @@ import {
   TableHeader,
   TableRow,
 } from "@workspace/ui/components/table";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@workspace/ui/components/dialog";
 import {
   Select,
   SelectContent,
@@ -46,10 +55,28 @@ import type { HoldingWithPnl } from "@/lib/queries";
 import { formatDate, formatDateTime, formatMxn } from "@/lib/format";
 import { PnlBadge } from "@/components/pnl-badge";
 
+import { AddPurchaseDialog } from "./add-purchase-dialog";
 import { HoldingActions } from "./holding-actions";
 import { RetryPriceButton } from "./retry-price-button";
 
 type Holding = HoldingWithPnl;
+
+type GroupUpdateStatus = Holding["lastUpdateStatus"] | "partial";
+
+type HoldingGroup = {
+  key: string;
+  holding: Holding;
+  lots: Holding[];
+  quantity: number;
+  boughtCount: number;
+  averageCostMxn: number | null;
+  marketMxn: number | null;
+  pnlMxn: number | null;
+  pnlPct: number | null;
+  alert: boolean;
+  lastUpdateStatus: GroupUpdateStatus;
+  lastPricedAt: Date | null;
+};
 
 /** Sentinela para "Todos los juegos" (los Select de base-ui no aceptan ""). */
 const ALL = "__all__";
@@ -71,19 +98,91 @@ const SORT_OPTIONS: { value: string; label: string }[] = [
  * precio, o `de_sobre` sin P&L) van SIEMPRE al final, sin importar la dirección.
  * Devuelve el arreglo original cuando la opción es "sin orden".
  */
-function sortHoldings(holdings: Holding[], sort: string): Holding[] {
-  if (sort === SORT_NONE) return holdings;
+function sortHoldings(groups: HoldingGroup[], sort: string): HoldingGroup[] {
+  if (sort === SORT_NONE) return groups;
   const getValue = sort.startsWith("value")
-    ? (h: Holding) => h.marketMxn
-    : (h: Holding) => h.pnlMxn;
+    ? (group: HoldingGroup) => group.marketMxn
+    : (group: HoldingGroup) => group.pnlMxn;
   const asc = sort.endsWith("asc");
-  return [...holdings].sort((a, b) => {
+  return [...groups].sort((a, b) => {
     const av = getValue(a);
     const bv = getValue(b);
     if (av == null && bv == null) return 0;
     if (av == null) return 1;
     if (bv == null) return -1;
     return asc ? av - bv : bv - av;
+  });
+}
+
+/** Agrupa compras de la misma carta y variante, conservando cada lote. */
+function groupHoldings(holdings: Holding[]): HoldingGroup[] {
+  const byCard = new Map<string, Holding[]>();
+
+  for (const holding of holdings) {
+    const identity =
+      holding.cardId != null
+        ? `${holding.gameSlug ?? holding.gameName ?? ""}|${holding.cardId}`
+        : [
+            holding.gameSlug,
+            holding.setName,
+            holding.number,
+            holding.name,
+          ].join("|");
+    const key = `${identity}|${holding.printing.trim().toLowerCase()}`;
+    const lots = byCard.get(key);
+    if (lots) lots.push(holding);
+    else byCard.set(key, [holding]);
+  }
+
+  return [...byCard.entries()].map(([key, lots]) => {
+    const bought = lots.filter((lot) => lot.acquisitionType === "comprada");
+    const totalCostMxn = bought.reduce(
+      (total, lot) => total + (lot.costBasisMxn ?? 0),
+      0,
+    );
+    const allPriced = lots.every((lot) => lot.marketMxn != null);
+    const boughtPriced = bought.every((lot) => lot.marketMxn != null);
+    const marketMxn = allPriced
+      ? lots.reduce((total, lot) => total + (lot.marketMxn ?? 0), 0)
+      : null;
+    const boughtMarketMxn = boughtPriced
+      ? bought.reduce((total, lot) => total + (lot.marketMxn ?? 0), 0)
+      : null;
+    const pnlMxn =
+      bought.length > 0 && boughtMarketMxn != null
+        ? boughtMarketMxn - totalCostMxn
+        : null;
+    const pnlPct =
+      pnlMxn != null && totalCostMxn > 0 ? (pnlMxn / totalCostMxn) * 100 : null;
+
+    const statuses = new Set(lots.map((lot) => lot.lastUpdateStatus));
+    const lastUpdateStatus: GroupUpdateStatus =
+      statuses.size === 1
+        ? (lots[0]?.lastUpdateStatus ?? null)
+        : statuses.has("updated")
+          ? "partial"
+          : statuses.has("failed")
+            ? "failed"
+            : null;
+    const lastPricedAt = lots.reduce<Date | null>((latest, lot) => {
+      if (!lot.lastPricedAt) return latest;
+      return !latest || lot.lastPricedAt > latest ? lot.lastPricedAt : latest;
+    }, null);
+
+    return {
+      key,
+      holding: lots[0]!,
+      lots,
+      quantity: lots.length,
+      boughtCount: bought.length,
+      averageCostMxn: bought.length > 0 ? totalCostMxn / bought.length : null,
+      marketMxn,
+      pnlMxn,
+      pnlPct,
+      alert: pnlPct != null && Math.abs(pnlPct) >= 10,
+      lastUpdateStatus,
+      lastPricedAt,
+    };
   });
 }
 
@@ -124,7 +223,7 @@ function UpdateStatusBadge({
   status,
   className,
 }: {
-  status: Holding["lastUpdateStatus"];
+  status: GroupUpdateStatus;
   className?: string;
 }) {
   if (status === "updated") {
@@ -152,6 +251,20 @@ function UpdateStatusBadge({
       >
         <TriangleAlertIcon className="size-3" />
         No actualizada
+      </Badge>
+    );
+  }
+  if (status === "partial") {
+    return (
+      <Badge
+        variant="secondary"
+        className={cn(
+          "gap-1 bg-amber-500/15 text-amber-700 dark:text-amber-400",
+          className,
+        )}
+      >
+        <TriangleAlertIcon className="size-3" />
+        Parcial
       </Badge>
     );
   }
@@ -183,6 +296,20 @@ function PnlCell({ holding, size }: { holding: Holding; size?: "sm" }) {
     <PnlBadge
       pnlPct={holding.pnlPct}
       pnlMxn={holding.pnlMxn}
+      size={size ? "sm" : "default"}
+    />
+  );
+}
+
+function GroupPnlCell({ group, size }: { group: HoldingGroup; size?: "sm" }) {
+  if (group.marketMxn == null) {
+    return <span className="text-xs text-muted-foreground">Sin precio</span>;
+  }
+  if (group.boughtCount === 0) return <FoundValueBadge />;
+  return (
+    <PnlBadge
+      pnlPct={group.pnlPct}
+      pnlMxn={group.pnlMxn}
       size={size ? "sm" : "default"}
     />
   );
@@ -223,6 +350,94 @@ function CardThumb({
   );
 }
 
+function HoldingGroupDialog({
+  group,
+  open,
+  onOpenChange,
+  onAddPurchase,
+}: {
+  group: HoldingGroup | null;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onAddPurchase: (group: HoldingGroup) => void;
+}) {
+  if (!group) return null;
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-3xl">
+        <DialogHeader>
+          <DialogTitle>{group.holding.name ?? "Sin nombre"}</DialogTitle>
+          <DialogDescription>
+            {group.quantity} {group.quantity === 1 ? "copia" : "copias"} ·{" "}
+            {group.holding.printing}
+          </DialogDescription>
+        </DialogHeader>
+
+        <Button
+          variant="outline"
+          size="sm"
+          className="w-fit"
+          onClick={() => onAddPurchase(group)}
+        >
+          <PlusIcon />
+          Agregar compra
+        </Button>
+
+        <div className="grid gap-3">
+          {group.lots.map((lot, index) => (
+            <div key={lot.id} className="grid gap-3 rounded-lg border p-3">
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-medium">Compra {index + 1}</span>
+                  <AcquisitionBadge type={lot.acquisitionType} />
+                  <UpdateStatusBadge status={lot.lastUpdateStatus} />
+                </div>
+                <HoldingActions holding={lot} />
+              </div>
+
+              <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm sm:grid-cols-4">
+                <div>
+                  <dt className="text-xs text-muted-foreground">Costo</dt>
+                  <dd className="tabular-nums">
+                    {lot.acquisitionType === "de_sobre"
+                      ? "—"
+                      : formatMxn(lot.costBasisMxn)}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-xs text-muted-foreground">Fecha</dt>
+                  <dd>{formatDate(lot.purchaseDate)}</dd>
+                </div>
+                <div>
+                  <dt className="text-xs text-muted-foreground">
+                    Valor actual
+                  </dt>
+                  <dd className="tabular-nums">{formatMxn(lot.marketMxn)}</dd>
+                </div>
+                <div>
+                  <dt className="text-xs text-muted-foreground">P&amp;L</dt>
+                  <dd className="pt-1">
+                    <PnlCell holding={lot} size="sm" />
+                  </dd>
+                </div>
+              </dl>
+
+              {lot.notes && (
+                <p className="text-sm text-muted-foreground">{lot.notes}</p>
+              )}
+
+              {lot.lastUpdateStatus === "failed" && (
+                <RetryPriceButton holdingId={lot.id} name={lot.name} />
+              )}
+            </div>
+          ))}
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 export type HoldingsViewProps = {
   holdings: Holding[];
 };
@@ -232,6 +447,18 @@ export function HoldingsView({ holdings }: HoldingsViewProps) {
   const [game, setGame] = React.useState<string>(ALL);
   // Estado del ordenamiento (ver SORT_OPTIONS).
   const [sort, setSort] = React.useState<string>(SORT_NONE);
+  const [selectedGroupKey, setSelectedGroupKey] = React.useState<string | null>(
+    null,
+  );
+  const [addPurchaseGroupKey, setAddPurchaseGroupKey] = React.useState<
+    string | null
+  >(null);
+
+  const groups = React.useMemo(() => groupHoldings(holdings), [holdings]);
+  const selectedGroup =
+    groups.find((group) => group.key === selectedGroupKey) ?? null;
+  const addPurchaseGroup =
+    groups.find((group) => group.key === addPurchaseGroupKey) ?? null;
 
   // Juegos presentes en la colección, deduplicados y ordenados. SOLO se listan
   // los TCG que el usuario realmente tiene agregados (no el catálogo de la API).
@@ -254,9 +481,9 @@ export function HoldingsView({ holdings }: HoldingsViewProps) {
   const filtered = React.useMemo(
     () =>
       activeGame === ALL
-        ? holdings
-        : holdings.filter((h) => gameKey(h) === activeGame),
-    [holdings, activeGame],
+        ? groups
+        : groups.filter((group) => gameKey(group.holding) === activeGame),
+    [groups, activeGame],
   );
 
   // Aplica el ordenamiento elegido sobre las cartas ya filtradas por juego.
@@ -279,6 +506,11 @@ export function HoldingsView({ holdings }: HoldingsViewProps) {
             Galería
           </TabsTrigger>
         </TabsList>
+
+        <span className="text-xs text-muted-foreground tabular-nums">
+          {groups.length} {groups.length === 1 ? "carta" : "cartas"} distintas ·{" "}
+          {holdings.length} {holdings.length === 1 ? "copia" : "copias"}
+        </span>
 
         <div className="flex flex-wrap items-center gap-2">
           {/* Filtro por juego: solo se muestra si coleccionas más de un TCG. */}
@@ -315,7 +547,7 @@ export function HoldingsView({ holdings }: HoldingsViewProps) {
               </Select>
               {activeGame !== ALL && (
                 <span className="text-xs text-muted-foreground tabular-nums">
-                  {filtered.length} de {holdings.length}
+                  {filtered.length} de {groups.length}
                 </span>
               )}
             </div>
@@ -358,88 +590,92 @@ export function HoldingsView({ holdings }: HoldingsViewProps) {
                 <TableHead>Carta</TableHead>
                 <TableHead>Set</TableHead>
                 <TableHead>Printing</TableHead>
-                <TableHead>Tipo</TableHead>
-                <TableHead className="text-right">Costo</TableHead>
+                <TableHead className="text-center">Cantidad</TableHead>
+                <TableHead className="text-right">Costo promedio</TableHead>
                 <TableHead className="text-right">Valor actual</TableHead>
                 <TableHead>P&amp;L</TableHead>
                 <TableHead>Último precio</TableHead>
-                <TableHead>Fecha</TableHead>
                 <TableHead className="w-10" />
               </TableRow>
             </TableHeader>
             <TableBody>
-              {sorted.map((h) => (
-                <TableRow
-                  key={h.id}
-                  className={cn(
-                    h.alert &&
-                      "bg-amber-500/[0.04] outline outline-amber-500/30 -outline-offset-1",
-                  )}
-                >
-                  <TableCell>
-                    <CardThumb holding={h} className="h-12 w-9" />
-                  </TableCell>
-                  <TableCell>
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="font-medium">
-                        {h.name ?? "Sin nombre"}
-                      </span>
-                      <UpdateStatusBadge status={h.lastUpdateStatus} />
-                      {h.lastUpdateStatus === "failed" && (
+              {sorted.map((group) => {
+                const h = group.holding;
+                return (
+                  <TableRow
+                    key={group.key}
+                    className={cn(
+                      group.alert &&
+                        "bg-amber-500/[0.04] outline -outline-offset-1 outline-amber-500/30",
+                    )}
+                  >
+                    <TableCell>
+                      <CardThumb holding={h} className="h-12 w-9" />
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-medium">
+                          {h.name ?? "Sin nombre"}
+                        </span>
+                        <UpdateStatusBadge status={group.lastUpdateStatus} />
+                      </div>
+                      {(h.number || h.rarity) && (
+                        <div className="text-xs text-muted-foreground">
+                          {[h.number ? `#${h.number}` : null, h.rarity]
+                            .filter(Boolean)
+                            .join(" · ")}
+                        </div>
+                      )}
+                    </TableCell>
+                    <TableCell className="text-muted-foreground">
+                      {h.setName ?? "—"}
+                    </TableCell>
+                    <TableCell>{h.printing}</TableCell>
+                    <TableCell className="text-center">
+                      <Badge variant="outline">×{group.quantity}</Badge>
+                    </TableCell>
+                    <TableCell className="text-right tabular-nums">
+                      {formatMxn(group.averageCostMxn)}
+                    </TableCell>
+                    <TableCell className="text-right tabular-nums">
+                      {group.marketMxn == null ? (
+                        <span className="text-xs text-muted-foreground">
+                          Sin precio
+                        </span>
+                      ) : (
+                        formatMxn(group.marketMxn)
+                      )}
+                    </TableCell>
+                    <TableCell>
+                      <GroupPnlCell group={group} />
+                    </TableCell>
+                    <TableCell className="text-xs whitespace-nowrap text-muted-foreground">
+                      {group.lastPricedAt ? (
+                        formatDateTime(group.lastPricedAt)
+                      ) : (
+                        <span className="italic">Nunca</span>
+                      )}
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex items-center gap-1">
                         <RetryPriceButton
-                          holdingId={h.id}
+                          holdingIds={group.lots.map((lot) => lot.id)}
                           name={h.name}
                           iconOnly
                         />
-                      )}
-                    </div>
-                    {(h.number || h.rarity) && (
-                      <div className="text-xs text-muted-foreground">
-                        {[h.number ? `#${h.number}` : null, h.rarity]
-                          .filter(Boolean)
-                          .join(" · ")}
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          aria-label={`Ver compras de ${h.name}`}
+                          onClick={() => setSelectedGroupKey(group.key)}
+                        >
+                          <EyeIcon />
+                        </Button>
                       </div>
-                    )}
-                  </TableCell>
-                  <TableCell className="text-muted-foreground">
-                    {h.setName ?? "—"}
-                  </TableCell>
-                  <TableCell>{h.printing}</TableCell>
-                  <TableCell>
-                    <AcquisitionBadge type={h.acquisitionType} />
-                  </TableCell>
-                  <TableCell className="text-right tabular-nums">
-                    {h.acquisitionType === "de_sobre"
-                      ? "—"
-                      : formatMxn(h.costBasisMxn)}
-                  </TableCell>
-                  <TableCell className="text-right tabular-nums">
-                    {h.marketMxn == null ? (
-                      <span className="text-xs text-muted-foreground">
-                        Sin precio
-                      </span>
-                    ) : (
-                      formatMxn(h.marketMxn)
-                    )}
-                  </TableCell>
-                  <TableCell>
-                    <PnlCell holding={h} />
-                  </TableCell>
-                  <TableCell className="text-muted-foreground text-xs whitespace-nowrap">
-                    {h.lastPricedAt ? (
-                      formatDateTime(h.lastPricedAt)
-                    ) : (
-                      <span className="italic">Nunca</span>
-                    )}
-                  </TableCell>
-                  <TableCell className="text-muted-foreground">
-                    {formatDate(h.purchaseDate)}
-                  </TableCell>
-                  <TableCell>
-                    <HoldingActions holding={h} />
-                  </TableCell>
-                </TableRow>
-              ))}
+                    </TableCell>
+                  </TableRow>
+                );
+              })}
             </TableBody>
           </Table>
         </div>
@@ -450,70 +686,102 @@ export function HoldingsView({ holdings }: HoldingsViewProps) {
       {/* ---------------------------------------------------------------- */}
       <TabsContent value="gallery">
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
-          {sorted.map((h) => (
-            <Card
-              key={h.id}
-              size="sm"
-              className={cn(
-                "relative",
-                h.alert && "ring-2 ring-amber-500/40",
-              )}
-            >
-              <UpdateStatusBadge
-                status={h.lastUpdateStatus}
-                className="absolute left-2 top-2 z-10 shadow-sm"
-              />
-              <CardThumb
-                holding={h}
-                className="aspect-[5/7] w-full bg-muted"
-              />
-              <CardHeader>
-                <CardTitle
-                  className="line-clamp-2 pr-7"
-                  title={h.name ?? undefined}
-                >
-                  {h.name ?? "Sin nombre"}
-                </CardTitle>
-                <CardAction>
-                  <HoldingActions holding={h} size="icon-xs" />
-                </CardAction>
-              </CardHeader>
-              <CardContent className="flex flex-col gap-2">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="truncate text-xs text-muted-foreground">
-                    {h.printing}
-                  </span>
-                  <AcquisitionBadge type={h.acquisitionType} />
-                </div>
-                <div className="flex items-center justify-between gap-2">
-                  {h.marketMxn == null ? (
-                    <span className="text-xs text-muted-foreground">
-                      Sin precio — corre Update prices
-                    </span>
-                  ) : (
-                    <span className="font-medium tabular-nums">
-                      {formatMxn(h.marketMxn)}
-                    </span>
-                  )}
-                  <PnlCell holding={h} size="sm" />
-                </div>
-                <p className="text-[10px] text-muted-foreground">
-                  {h.lastPricedAt
-                    ? `Precio: ${formatDateTime(h.lastPricedAt)}`
-                    : "Sin precio registrado"}
-                </p>
-                {h.lastUpdateStatus === "failed" && (
-                  <RetryPriceButton
-                    holdingId={h.id}
-                    name={h.name}
-                    className="w-full"
-                  />
+          {sorted.map((group) => {
+            const h = group.holding;
+            return (
+              <Card
+                key={group.key}
+                size="sm"
+                className={cn(
+                  "relative",
+                  group.alert && "ring-2 ring-amber-500/40",
                 )}
-              </CardContent>
-            </Card>
-          ))}
+              >
+                <UpdateStatusBadge
+                  status={group.lastUpdateStatus}
+                  className="absolute top-2 left-2 z-10 shadow-sm"
+                />
+                <Badge
+                  variant="secondary"
+                  className="absolute top-2 right-2 z-10 shadow-sm"
+                >
+                  ×{group.quantity}
+                </Badge>
+                <CardThumb
+                  holding={h}
+                  className="aspect-[5/7] w-full bg-muted"
+                />
+                <CardHeader>
+                  <CardTitle
+                    className="line-clamp-2"
+                    title={h.name ?? undefined}
+                  >
+                    {h.name ?? "Sin nombre"}
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="flex flex-col gap-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="truncate text-xs text-muted-foreground">
+                      {h.printing}
+                    </span>
+                    <span className="text-xs text-muted-foreground">
+                      Prom. {formatMxn(group.averageCostMxn)}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between gap-2">
+                    {group.marketMxn == null ? (
+                      <span className="text-xs text-muted-foreground">
+                        Sin precio — corre Update prices
+                      </span>
+                    ) : (
+                      <span className="font-medium tabular-nums">
+                        {formatMxn(group.marketMxn)}
+                      </span>
+                    )}
+                    <GroupPnlCell group={group} size="sm" />
+                  </div>
+                  <p className="text-[10px] text-muted-foreground">
+                    {group.lastPricedAt
+                      ? `Precio: ${formatDateTime(group.lastPricedAt)}`
+                      : "Sin precio registrado"}
+                  </p>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="w-full"
+                    onClick={() => setSelectedGroupKey(group.key)}
+                  >
+                    <EyeIcon />
+                    Ver {group.quantity === 1 ? "compra" : "compras"}
+                  </Button>
+                </CardContent>
+              </Card>
+            );
+          })}
         </div>
       </TabsContent>
+
+      <HoldingGroupDialog
+        group={selectedGroup}
+        open={selectedGroup != null}
+        onOpenChange={(open) => {
+          if (!open) setSelectedGroupKey(null);
+        }}
+        onAddPurchase={(group) => {
+          setSelectedGroupKey(null);
+          setAddPurchaseGroupKey(group.key);
+        }}
+      />
+
+      {addPurchaseGroup && (
+        <AddPurchaseDialog
+          holding={addPurchaseGroup.holding}
+          open
+          onOpenChange={(open) => {
+            if (!open) setAddPurchaseGroupKey(null);
+          }}
+        />
+      )}
     </Tabs>
   );
 }
