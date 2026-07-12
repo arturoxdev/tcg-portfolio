@@ -20,8 +20,8 @@ export default async function HoldingsPage() {
         </h1>
         {holdings.length > 0 && (
           <p className="text-sm text-muted-foreground">
-            {holdings.length}{" "}
-            {holdings.length === 1 ? "carta" : "cartas"} en tu portafolio.
+            {holdings.length} {holdings.length === 1 ? "copia" : "copias"} en tu
+            portafolio.
           </p>
         )}
       </div>

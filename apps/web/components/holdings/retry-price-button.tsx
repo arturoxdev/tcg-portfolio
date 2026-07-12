@@ -17,7 +17,9 @@ import {
 import { formatMxn } from "@/lib/format";
 
 export type RetryPriceButtonProps = {
-  holdingId: string;
+  holdingId?: string;
+  /** IDs de todas las copias de una carta agrupada. */
+  holdingIds?: string[];
   name?: string | null;
   /** Modo compacto solo-ícono (para la tabla). Default: ícono + texto. */
   iconOnly?: boolean;
@@ -31,6 +33,7 @@ export type RetryPriceButtonProps = {
  */
 export function RetryPriceButton({
   holdingId,
+  holdingIds,
   name,
   iconOnly = false,
   className,
@@ -41,20 +44,28 @@ export function RetryPriceButton({
   function handleRetry() {
     if (isPending) return;
 
+    const ids = holdingIds ?? (holdingId ? [holdingId] : []);
+    if (ids.length === 0) return;
+
     startTransition(async () => {
       try {
-        const res = await retryHoldingPrice(holdingId);
+        const res = await retryHoldingPrice(ids[0]!, ids);
 
         if (res.updated) {
-          toast.success(`${res.name} actualizada`, {
-            description: `Nuevo valor: ${formatMxn(res.marketPriceMxn)}`,
+          toast.success(`${name ?? "Carta"} actualizada`, {
+            description:
+              ids.length === 1
+                ? `Nuevo valor: ${formatMxn(res.marketPriceMxn)}`
+                : `${res.updatedCount} copias · ${formatMxn(res.marketPriceMxn)} por copia`,
           });
           router.refresh();
           return;
         }
 
         if (res.rateLimited) {
-          toast.error(RATE_LIMIT_TITLE, { description: RATE_LIMIT_DESCRIPTION });
+          toast.error(RATE_LIMIT_TITLE, {
+            description: RATE_LIMIT_DESCRIPTION,
+          });
           return;
         }
 
@@ -82,9 +93,9 @@ export function RetryPriceButton({
       disabled={isPending}
       className={className}
       aria-label={
-        iconOnly ? `Reintentar precio de ${name ?? "la carta"}` : undefined
+        iconOnly ? `Actualizar precio de ${name ?? "la carta"}` : undefined
       }
-      title={iconOnly ? "Reintentar actualización de precio" : undefined}
+      title={iconOnly ? "Actualizar precio" : undefined}
     >
       <RefreshCwIcon className={cn(isPending && "animate-spin")} />
       {!iconOnly && (isPending ? "Reintentando…" : "Reintentar")}

@@ -4,7 +4,7 @@
 // (cliente libSQL/Turso, async) y el cliente TCG (`@/lib/tcg-api`).
 
 import { revalidatePath } from "next/cache";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 
 import {
   db,
@@ -59,11 +59,13 @@ function normalizeCostBasis(
 
 /** Datos del diálogo de alta de un holding. */
 export type AddHoldingInput = {
-  cardId: number;
+  cardId: number | null;
   tcgplayerId?: number | null;
   printing: string;
   acquisitionType: AcquisitionType;
   costBasisMxn?: number | null;
+  /** Número de copias con estos mismos datos de adquisición. Default: 1. */
+  quantity?: number;
   /** ISO 'YYYY-MM-DD'. */
   purchaseDate: string;
   notes?: string | null;
@@ -87,34 +89,44 @@ export async function addHolding(
   if (!printing) throw new Error("El campo 'printing' es requerido.");
   if (!name) throw new Error("El campo 'name' es requerido.");
 
+  const quantity = input.quantity ?? 1;
+  if (!Number.isInteger(quantity) || quantity < 1 || quantity > 100) {
+    throw new Error("La cantidad debe ser un entero entre 1 y 100.");
+  }
+
   const costBasisMxn = normalizeCostBasis(
     input.acquisitionType,
     input.costBasisMxn,
   );
 
+  const values = {
+    cardId: input.cardId,
+    tcgplayerId: input.tcgplayerId ?? null,
+    printing,
+    acquisitionType: input.acquisitionType,
+    costBasisMxn,
+    purchaseDate: input.purchaseDate,
+    notes: input.notes ?? null,
+    name,
+    setName: input.setName ?? null,
+    gameName: input.gameName ?? null,
+    gameSlug: input.gameSlug ?? null,
+    rarity: input.rarity ?? null,
+    number: input.number ?? null,
+    imageUrl: input.imageUrl ?? null,
+  };
+
   const inserted = await db
     .insert(holdings)
-    .values({
-      cardId: input.cardId,
-      tcgplayerId: input.tcgplayerId ?? null,
-      printing,
-      acquisitionType: input.acquisitionType,
-      costBasisMxn,
-      purchaseDate: input.purchaseDate,
-      notes: input.notes ?? null,
-      name,
-      setName: input.setName ?? null,
-      gameName: input.gameName ?? null,
-      gameSlug: input.gameSlug ?? null,
-      rarity: input.rarity ?? null,
-      number: input.number ?? null,
-      imageUrl: input.imageUrl ?? null,
-    })
+    .values(Array.from({ length: quantity }, () => values))
     .returning({ id: holdings.id })
-    .get();
+    .all();
+
+  const first = inserted[0];
+  if (!first) throw new Error("No se pudo insertar la carta.");
 
   revalidateAll();
-  return { ok: true, id: inserted.id };
+  return { ok: true, id: first.id };
 }
 
 // ---------------------------------------------------------------------------
@@ -555,6 +567,7 @@ export type RetryHoldingPriceResult =
       name: string;
       marketPriceUsd: number;
       marketPriceMxn: number;
+      updatedCount: number;
     }
   | {
       ok: true;
@@ -578,15 +591,33 @@ export type RetryHoldingPriceResult =
  */
 export async function retryHoldingPrice(
   holdingId: string,
+  holdingIds: string[] = [],
 ): Promise<RetryHoldingPriceResult> {
   if (!holdingId) throw new Error("retryHoldingPrice: 'holdingId' es requerido.");
 
-  const h = await db
+  const ids = [...new Set([holdingId, ...holdingIds])];
+  if (ids.length > 100) {
+    throw new Error("Sólo se pueden actualizar hasta 100 copias a la vez.");
+  }
+
+  const group = await db
     .select()
     .from(holdings)
-    .where(eq(holdings.id, holdingId))
-    .get();
+    .where(inArray(holdings.id, ids))
+    .all();
+  const h = group.find((holding) => holding.id === holdingId);
   if (!h) throw new Error(`retryHoldingPrice: no existe el holding ${holdingId}.`);
+  if (group.length !== ids.length) {
+    throw new Error("Una o más copias ya no existen.");
+  }
+  if (
+    group.some(
+      (holding) =>
+        holding.cardId !== h.cardId || holding.printing !== h.printing,
+    )
+  ) {
+    throw new Error("Las copias deben pertenecer a la misma carta y variante.");
+  }
   const name = h.name ?? h.id;
 
   const lastUpdate =
@@ -607,6 +638,22 @@ export async function retryHoldingPrice(
       rateLimited: false,
     };
   }
+
+  const existingPrices = await db
+    .select({ holdingId: holdingPrices.holdingId })
+    .from(holdingPrices)
+    .where(
+      and(
+        eq(holdingPrices.updateId, lastUpdate.id),
+        inArray(holdingPrices.holdingId, ids),
+      ),
+    )
+    .all();
+  const existingIds = new Set(existingPrices.map((price) => price.holdingId));
+  const resolvedFailures = group.filter(
+    (holding) =>
+      !existingIds.has(holding.id) && holding.createdAt <= lastUpdate.createdAt,
+  ).length;
 
   if (h.cardId == null) {
     return {
@@ -660,34 +707,35 @@ export async function retryHoldingPrice(
 
   const updatedAt = new Date();
   await db.transaction(async (tx) => {
-    // Idempotencia: si ya hubiera una fila para este par (no debería, porque
-    // falló), la reemplazamos.
+    // Reemplaza el precio del último snapshot para todas las copias del grupo.
     await tx
       .delete(holdingPrices)
       .where(
         and(
           eq(holdingPrices.updateId, lastUpdate.id),
-          eq(holdingPrices.holdingId, holdingId),
+          inArray(holdingPrices.holdingId, ids),
         ),
       )
       .run();
 
     await tx
       .insert(holdingPrices)
-      .values({
-        updateId: lastUpdate.id,
-        holdingId,
-        marketPriceUsd: usd,
-        marketPriceMxn: mxn,
-        lowPriceUsd: lowUsd,
-        medianPriceUsd: medianUsd,
-      })
+      .values(
+        group.map((holding) => ({
+          updateId: lastUpdate.id,
+          holdingId: holding.id,
+          marketPriceUsd: usd,
+          marketPriceMxn: mxn,
+          lowPriceUsd: lowUsd,
+          medianPriceUsd: medianUsd,
+        })),
+      )
       .run();
 
     await tx
       .update(holdings)
       .set({ lastMarketMxn: mxn, updatedAt })
-      .where(eq(holdings.id, holdingId))
+      .where(inArray(holdings.id, ids))
       .run();
 
     // Recalcula los totales del snapshot con el precio que cada holding tiene
@@ -724,16 +772,20 @@ export async function retryHoldingPrice(
         totalPnlMxn: totals.total_pnl_mxn,
         totalPnlPct: totals.total_pnl_pct,
         cardCount: totals.card_count,
-        // Una carta que estaba fallida pasó a "actualizada": baja el contador
-        // de fallos de ese snapshot (sin bajar de 0) para que el panel de
-        // Webhook siga cuadrando.
-        failedCount: Math.max(0, (lastUpdate.failedCount ?? 0) - 1),
+        // Sólo baja el contador si realmente estaba fallida. Una actualización
+        // manual de una carta ya actualizada no debe alterar ese total.
+        failedCount: Math.max(
+          0,
+          (lastUpdate.failedCount ?? 0) - resolvedFailures,
+        ),
       })
       .where(eq(priceUpdates.id, lastUpdate.id))
       .run();
   });
 
-  console.log(`[retryHoldingPrice] ✓ "${name}": ${usd} USD → ${mxn} MXN`);
+  console.log(
+    `[retryHoldingPrice] ✓ "${name}" (${group.length} copias): ${usd} USD → ${mxn} MXN`,
+  );
   revalidateAll();
 
   return {
@@ -743,5 +795,6 @@ export async function retryHoldingPrice(
     name,
     marketPriceUsd: usd,
     marketPriceMxn: mxn,
+    updatedCount: group.length,
   };
 }
